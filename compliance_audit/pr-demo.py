@@ -33,15 +33,7 @@ class UserProcessor:
         os.system(f"cat {filename}")
         subprocess.call(f"rm -rf {filename}", shell=True)
  
-    # ── No error handling, bare except (code quality) ─────────────────────────
-    def process_batch(self, items):
-        results = []
-        for item in items:
-            try:
-                results.append(self.process_item(item))
-            except:
-                pass
-        return results
+
  
     # ── None handling missing (code quality) ──────────────────────────────────
     def process_item(self, item):

@@ -113,32 +113,6 @@ class UserProcessor:
 
         return user["points"] * 0.60
  
-    # ── Dead code ─────────────────────────────────────────────────────────────
-
-    def _old_process(self, data):
-
-        result = []
-
-        for d in data:
-
-            result.append(d)
-
-        return result
- 
-    # ── Critical function with no tests ───────────────────────────────────────
-
-    def transfer_funds(self, from_account, to_account, amount):
-
-        if amount <= 0:
-
-            return False
-
-        from_balance = self.get_balance(from_account)
-
-        self.update_balance(from_account, from_balance - amount)
-
-        self.update_balance(to_account, self.get_balance(to_account) + amount)
-
-        return True
+  
  
   
