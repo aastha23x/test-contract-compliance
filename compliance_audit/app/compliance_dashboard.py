@@ -48,19 +48,11 @@ DASHBOARD_HTML = """
 
     :root {
 
-<<<<<<< Updated upstream
-      --bg:          #ffdbe6;
-
-      --bg2:         #efe9e1;
-
-      --surface:     #fdecf2;
-=======
       --bg:          #f7f4f0;
 
       --bg2:         #efe9e1;
 
       --surface:     #ffffff;
->>>>>>> Stashed changes
 
       --surface2:    #faf7f4;
 
@@ -92,19 +84,11 @@ DASHBOARD_HTML = """
 
       --high-bd:     #f0c8a8;
 
-<<<<<<< Updated upstream
-      --medium:      #BDB76B;
-
-      --medium-bg:   #BDB76B;
-
-      --medium-bd:   #BDB76B;
-=======
       --medium:      #907018;
 
       --medium-bg:   #fef8e8;
 
       --medium-bd:   #e8d898;
->>>>>>> Stashed changes
 
       --low:         #287048;
 
@@ -860,11 +844,7 @@ SEV_COLORS = {
 
     "HIGH":     "#b05020",
 
-<<<<<<< Updated upstream
-    "MEDIUM":   "#902245",
-=======
     "MEDIUM":   "#907018",
->>>>>>> Stashed changes
 
     "LOW":      "#287048",
 
@@ -889,11 +869,7 @@ def score_color(s: int) -> str:
 
     if s < 75: return "#b05020"
 
-<<<<<<< Updated upstream
-    if s < 90: return "#902245"
-=======
     if s < 90: return "#907018"
->>>>>>> Stashed changes
 
     return "#287048"
  
