@@ -51,7 +51,7 @@ def append_event(event_type: str, payload: dict):
         json.dump(events[-50:], f, indent=2)
 
 
-@app.post("/webhooks/github")
+@app.post("/webhook/github")
 async def github_webhook(request: Request):
     body = await request.body()
 
