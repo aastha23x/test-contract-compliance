@@ -1,0 +1,5 @@
+AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+GITHUB_TOKEN = "ghp_abcd1234567890abcd1234567890abcdef12"
+OPENAI_KEY = "sk-abcdefghijklmnopqrstuvwxyz123456"
+SLACK_TOKEN = "xoxb-123456789-123456789-abcdefghijklmnopqrstuvwx"
+GOOGLE_KEY = "AIzaSyAbcdefghijklmnopqrstuvwxyz123456"
