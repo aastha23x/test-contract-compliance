@@ -1,0 +1,71 @@
+{
+  "generated_at": "2026-05-08T16:32:42.779634",
+  "overall_score": 88,
+  "framework_scores": {
+    "ISO27001": 85,
+    "SOC2": 70,
+    "HIPAA": 100,
+    "GDPR": 100
+  },
+  "framework_map": {
+    "ISO27001": {
+      "A.12.1.2 \u2014 Change Management": [
+        {
+          "id": "V001",
+          "title": "Security scan skipped or change management bypassed",
+          "severity": "HIGH",
+          "source": "aastha23x/test-contract-compliance",
+          "user": "aastha23x",
+          "remediation": "1. Enforce mandatory security scans for all pull requests, regardless of urgency, by integrating automated security tools such as GitHub Advanced Security or third-party scanners.\n2. Implement a policy that requires change management approval for all emergency changes. This can be achieved by setting up branch protection rules that mandate approvals from designated reviewers.\n3. Update the repository's CI/CD pipeline to fail builds if security scans are skipped or bypassed.\n4. Educate developers on the importance of security scans and change management processes, emphasizing the risks of bypassing these controls.\n5. Review the changes in 'compliance_audit/test14.py' manually to ensure no vulnerabilities were introduced."
+        }
+      ]
+    },
+    "SOC2": {
+      "CC8.1 \u2014 Change Management": [
+        {
+          "id": "V001",
+          "title": "Security scan skipped or change management bypassed",
+          "severity": "HIGH",
+          "source": "aastha23x/test-contract-compliance",
+          "user": "aastha23x",
+          "remediation": "1. Enforce mandatory security scans for all pull requests, regardless of urgency, by integrating automated security tools such as GitHub Advanced Security or third-party scanners.\n2. Implement a policy that requires change management approval for all emergency changes. This can be achieved by setting up branch protection rules that mandate approvals from designated reviewers.\n3. Update the repository's CI/CD pipeline to fail builds if security scans are skipped or bypassed.\n4. Educate developers on the importance of security scans and change management processes, emphasizing the risks of bypassing these controls.\n5. Review the changes in 'compliance_audit/test14.py' manually to ensure no vulnerabilities were introduced."
+        }
+      ],
+      "CC6.1 \u2014 Logical and Physical Access Controls": [
+        {
+          "id": "V002",
+          "title": "MFA not enforced or authentication failure",
+          "severity": "HIGH",
+          "source": "aastha23x/test-contract-compliance",
+          "user": "aastha23x",
+          "remediation": "1. Enforce MFA for all users accessing the repository by enabling GitHub's organization-wide MFA settings.\n2. Configure deployment pipelines to require MFA for all deployment actions. This can be achieved by integrating identity providers that enforce MFA policies.\n3. Audit the repository's access logs to identify any unauthorized access during the deployment process.\n4. Educate developers on the importance of MFA and its role in securing the repository and deployment environments.\n5. Review the deployment process to ensure that MFA is a mandatory step and cannot be bypassed under any circumstances."
+        }
+      ]
+    },
+    "HIPAA": {},
+    "GDPR": {}
+  },
+  "priority_fixes": [
+    {
+      "rank": 1,
+      "id": "V001",
+      "severity": "HIGH",
+      "title": "Security scan skipped or change management bypassed",
+      "remediation": "1. Enforce mandatory security scans for all pull requests, regardless of urgency, by integrating automated security tools such as GitHub Advanced Security or third-party scanners.\n2. Implement a policy that requires change management approval for all emergency changes. This can be achieved by setting up branch protection rules that mandate approvals from designated reviewers.\n3. Update the repository's CI/CD pipeline to fail builds if security scans are skipped or bypassed.\n4. Educate developers on the importance of security scans and change management processes, emphasizing the risks of bypassing these controls.\n5. Review the changes in 'compliance_audit/test14.py' manually to ensure no vulnerabilities were introduced."
+    },
+    {
+      "rank": 2,
+      "id": "V002",
+      "severity": "HIGH",
+      "title": "MFA not enforced or authentication failure",
+      "remediation": "1. Enforce MFA for all users accessing the repository by enabling GitHub's organization-wide MFA settings.\n2. Configure deployment pipelines to require MFA for all deployment actions. This can be achieved by integrating identity providers that enforce MFA policies.\n3. Audit the repository's access logs to identify any unauthorized access during the deployment process.\n4. Educate developers on the importance of MFA and its role in securing the repository and deployment environments.\n5. Review the deployment process to ensure that MFA is a mandatory step and cannot be bypassed under any circumstances."
+    },
+    {
+      "rank": 3,
+      "id": "V003",
+      "severity": "HIGH",
+      "title": "Compliance policy exception or bypass requested",
+      "remediation": "1. Implement strict policies that disallow compliance policy exceptions without documented justification and approval from senior management.\n2. Configure branch protection rules to enforce compliance checks and prevent merges without passing all required checks.\n3. Audit the repository to identify any previous instances of compliance policy exceptions and assess their impact.\n4. Educate developers on the importance of adhering to compliance policies and the risks associated with bypassing them.\n5. Review the changes in the pull request manually to ensure they meet compliance standards and do not introduce any risks."
+    }
+  ]
+}
