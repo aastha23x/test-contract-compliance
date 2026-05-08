@@ -25,14 +25,13 @@ async def github_webhook(request: Request):
 
 @app.get("/")
 async def get_dashboard():
-    dashboard_path = "compliance_dashboard.html"
-    if os.path.exists(dashboard_path):
-        with open(dashboard_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    else:
-        return HTMLResponse(
-            content="<h1>Dashboard not yet generated.</h1><p>Send a GitHub webhook to <code>/webhooks/github</code> to trigger the compliance scan, or manually run <code>python run_pipeline.py</code>.</p>"
-        )
+    return HTMLResponse(
+        content="""
+        <h1>Webhook Server Running</h1>
+        <p>The compliance dashboard is now a live application. Please visit <a href="http://localhost:8080">http://localhost:8080</a> to view it.</p>
+        <p>Send a GitHub webhook to <code>/webhooks/github</code> to trigger the compliance scan.</p>
+        """
+    )
 
 if __name__ == "__main__":
     import uvicorn

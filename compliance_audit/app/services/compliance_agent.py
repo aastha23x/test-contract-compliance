@@ -38,46 +38,52 @@ def fetch_all_data():
         return {"GITHUB_WEBHOOK": []}
 
 # ── Build prompt ───────────────────────────────────────────────
-def build_prompt(data):
+def build_prompt(data, base_violations):
+    # Prepare a minimal summary of base violations for the LLM
+    v_summary = []
+    for v in base_violations:
+        v_summary.append({
+            "id": v["id"],
+            "title": v["title"],
+            "rule_id": v["rule_id"],
+            "source": v["source"],
+            "severity": v["severity"],
+            "user_involved": v.get("user_involved"),
+            "timestamp": v.get("timestamp"),
+            "basic_description": v["description"]
+        })
+
     return """
-You are an expert AI Compliance and Security Audit Agent. Your task is to analyze the security and audit data logs provided below and detect ALL compliance violations. 
+You are an expert AI Compliance and Security Audit Agent. 
 
-CRITICAL INSTRUCTION: You MUST extract REAL violations from the provided data. DO NOT hallucinate. 
+Our deterministic rule engine (regex/spaCy) has already scanned the GitHub webhook data and identified the following compliance violations.
+Your task is to ENRICH these existing violations with highly detailed, contextual explanations and precise remediation steps.
 
-For each REAL violation you discover, return ONLY this JSON format (this is just the structural template, you must fill it with the REAL data you extracted):
+CRITICAL INSTRUCTION: Do NOT invent new violations. ONLY enrich the exact violations provided in the BASE VIOLATIONS list.
+Keep the original "id", "title", "severity", "source", "user_involved", and "timestamp" exactly as they appear in the BASE VIOLATIONS list.
+Your job is to generate a comprehensive "description" and "remediation" for each violation based on the GITHUB WEBHOOK PAYLOAD.
+
+For each violation, return ONLY this JSON format (fill in the description and remediation):
 {
   "violations": [
     {
-      "id": "<GENERATE_UNIQUE_ID>",
-      "source": "<NAME_OF_THE_COLLECTION_WHERE_FOUND>",
-      "severity": "<CRITICAL or HIGH or MEDIUM or LOW>",
-      "title": "<A_DESCRIPTIVE_SHORT_TITLE>",
-      "description": "<PROVIDE_AN_EXTREMELY_DETAILED_EXPLANATION: Write at least 2-3 paragraphs. Detail EXACTLY what happened in the GitHub event. Explain deeply WHY this violates compliance frameworks. Detail the specific security risks (e.g., data breach, lateral movement). Quote the exact problematic code, filename, or commit message from the payload.>",
-      "user_involved": "<NAME_AND_EMAIL_IF_PRESENT>",
-      "timestamp": "<EXACT_TIMESTAMP_FROM_LOG>",
-      "frameworks": {
-        "ISO27001": "<CONTROL_ID_AND_NAME or null>",
-        "SOC2": "<CONTROL_ID_AND_NAME or null>",
-        "HIPAA": "<CONTROL_ID_AND_NAME or null>",
-        "GDPR": "<CONTROL_ID_AND_NAME or null>"
-      },
+      "id": "<USE_EXACT_ID_FROM_BASE>",
+      "source": "<USE_EXACT_SOURCE_FROM_BASE>",
+      "severity": "<USE_EXACT_SEVERITY_FROM_BASE>",
+      "title": "<USE_EXACT_TITLE_FROM_BASE>",
+      "user_involved": "<USE_EXACT_USER_FROM_BASE>",
+      "timestamp": "<USE_EXACT_TIMESTAMP_FROM_BASE>",
+      "description": "<PROVIDE_AN_EXTREMELY_DETAILED_EXPLANATION: Write at least 2-3 paragraphs. Detail EXACTLY what happened in the GitHub event. Explain deeply WHY this is a security risk (e.g., data breach, lateral movement). Quote the exact problematic code, filename, or commit message from the payload.>",
       "remediation": "<EXACT_AND_DETAILED_STEPS_TO_FIX: Provide a step-by-step technical guide on how to fix this issue in the codebase or repository settings.>"
     }
-  ],
-  "summary": {
-    "total_violations": <INTEGER_COUNT>,
-    "critical": <INTEGER_COUNT>,
-    "high": <INTEGER_COUNT>,
-    "medium": <INTEGER_COUNT>,
-    "low": <INTEGER_COUNT>,
-    "compliance_score": "<SCORE_OUT_OF_100>",
-    "overall_risk": "<CRITICAL or HIGH or MEDIUM or LOW>"
-  }
+  ]
 }
 
 Return ONLY the valid JSON. No markdown formatting, no explanations, no chat text.
 
-DATA TO ANALYZE:
+BASE VIOLATIONS:
+""" + json.dumps(v_summary, indent=2) + """
+
 GITHUB WEBHOOK PAYLOAD:
 """ + json.dumps(list(data.values())[0] if data else [], indent=2)
 
@@ -99,7 +105,7 @@ def run_compliance_agent(prompt):
             }
         ],
         "temperature": 0.1,
-        "max_tokens": 8192  # FIX: increased from 4096 to prevent JSON truncation
+        "max_tokens": 8192
     }
 
     print("🤖 Calling Azure OpenAI API...")
@@ -135,13 +141,47 @@ def parse_llm_response(result_json: str) -> dict | None:
         print(result_json)
         return None
 
+# ── Build summary ───────────────────────────────────────────────
+def build_summary(violations: list[dict], spacy_count: int, regex_count: int) -> dict:
+    counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    for v in violations:
+        sev = v.get("severity", "LOW")
+        counts[sev] = counts.get(sev, 0) + 1
+
+    total = len(violations)
+    # Score: start 100, deduct per severity
+    deductions = counts["CRITICAL"] * 25 + counts["HIGH"] * 15 + counts["MEDIUM"] * 8 + counts["LOW"] * 3
+    score = max(0, 100 - deductions)
+
+    if score < 40:
+        risk = "CRITICAL"
+    elif score < 60:
+        risk = "HIGH"
+    elif score < 80:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
+
+    return {
+        "total_violations":  total,
+        "critical":          counts["CRITICAL"],
+        "high":              counts["HIGH"],
+        "medium":            counts["MEDIUM"],
+        "low":               counts["LOW"],
+        "compliance_score":  score,
+        "overall_risk":      risk,
+        "llm_detections":    0, # LLM no longer detects, only enriches
+        "spacy_detections":  spacy_count,
+        "regex_detections":  regex_count,
+    }
+
 
 # ── Print violations ───────────────────────────────────────────
 def print_results(violations: list, summary: dict):
     """Pretty-print the merged violation report to stdout."""
     print("\n" + "=" * 70)
     print("   HYBRID COMPLIANCE AGENT - VIOLATION REPORT")
-    print("   (LLM + spaCy + Regex detections merged)")
+    print("   (Rule Engine Detection + LLM Enrichment)")
     print("=" * 70)
 
     print(f"\nSUMMARY")
@@ -152,7 +192,6 @@ def print_results(violations: list, summary: dict):
     print(f"   Low              : {summary.get('low', 0)}")
     print(f"   Compliance Score : {summary.get('compliance_score', 'N/A')} / 100")
     print(f"   Overall Risk     : {summary.get('overall_risk', 'N/A')}")
-    print(f"   LLM Detections   : {summary.get('llm_detections', '?')}")
     print(f"   spaCy Detections : {summary.get('spacy_detections', '?')}")
     print(f"   Regex Detections : {summary.get('regex_detections', '?')}")
 
@@ -164,7 +203,7 @@ def print_results(violations: list, summary: dict):
         tag = (
             " [SPACY] " if v.get("detection") == "SPACY"
             else " [REGEX] " if v.get("detection") == "REGEX"
-            else " [LLM]  "
+            else " [RULE]  "
         )
         severity = v.get("severity", "")
         print(f"\n[{v.get('id')}]{tag} {v.get('title')}")
@@ -173,14 +212,6 @@ def print_results(violations: list, summary: dict):
         print(f"   User       : {v.get('user_involved', 'N/A')}")
         print(f"   Timestamp  : {v.get('timestamp', 'N/A')}")
         print(f"   Description: {v.get('description')}")
-
-        frameworks = v.get("frameworks", {})
-        active = {k: val for k, val in frameworks.items() if val}
-        if active:
-            print(f"   Frameworks :")
-            for fw, control in active.items():
-                print(f"      {fw}: {control}")
-
         print(f"   Remediation: {v.get('remediation')}")
 
     print("\n" + "=" * 70)
@@ -204,33 +235,44 @@ if __name__ == "__main__":
     regex_violations = run_regex_detector(data)
     print(f"   Regex found {len(regex_violations)} violation(s)\n")
 
-    # ── Layer B: LLM analysis (contextual, AI-powered) ─────────────────
-    print("🤖 Running LLM Compliance Agent (Layer B)...")
-    prompt         = build_prompt(data)
-    llm_raw        = run_compliance_agent(prompt)
-    llm_parsed     = parse_llm_response(llm_raw) if llm_raw else None
-    llm_violations = llm_parsed.get("violations", []) if llm_parsed else []
-    print(f"   LLM found {len(llm_violations)} violation(s)\n")
+    # Combine deterministic violations
+    base_violations = spacy_violations + regex_violations
 
-    # ── Merge: combine spaCy + Regex, then deduplicate against LLM ────
-    print("🔀 Merging LLM + spaCy + Regex results...")
-    combined_deterministic = spacy_violations + regex_violations
-    merged_violations = merge_violations(llm_violations, combined_deterministic)
-    merged_summary    = rebuild_summary(merged_violations)
-    print(
-        f"   ✅ Merged total: {merged_summary['total_violations']} violations "
-        f"({merged_summary['llm_detections']} LLM + "
-        f"{merged_summary['spacy_detections']} spaCy + "
-        f"{merged_summary['regex_detections']} Regex unique)\n"
-    )
+    if not base_violations:
+        print("✅ No violations found by rule engines. Skipping LLM enrichment.\n")
+        final_violations = []
+    else:
+        # ── Layer B: LLM Context Enrichment ──────────────────────────────────
+        print(f"🤖 Running LLM Enrichment on {len(base_violations)} violation(s)...")
+        prompt = build_prompt(data, base_violations)
+        llm_raw = run_compliance_agent(prompt)
+        llm_parsed = parse_llm_response(llm_raw) if llm_raw else None
+        
+        # Merge LLM descriptions back into base_violations
+        if llm_parsed and "violations" in llm_parsed:
+            enriched_map = {v["id"]: v for v in llm_parsed["violations"]}
+            for v in base_violations:
+                if v["id"] in enriched_map:
+                    ev = enriched_map[v["id"]]
+                    v["description"] = ev.get("description", v["description"])
+                    v["remediation"] = ev.get("remediation", v.get("remediation", ""))
+        
+        final_violations = base_violations
+        
+        # Re-sort and re-index
+        sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        final_violations.sort(key=lambda x: sev_order.get(x.get("severity", "LOW"), 3))
+        for i, v in enumerate(final_violations, 1):
+            v["id"] = f"V{i:03d}"
 
+    final_summary = build_summary(final_violations, len(spacy_violations), len(regex_violations))
 
     # ── Print & save ───────────────────────────────────────────
-    print_results(merged_violations, merged_summary)
+    print_results(final_violations, final_summary)
 
     final_report = {
-        "violations": merged_violations,
-        "summary":    merged_summary,
+        "violations": final_violations,
+        "summary":    final_summary,
     }
     with open("violation_report.json", "w") as f:
         json.dump(final_report, f, indent=2)

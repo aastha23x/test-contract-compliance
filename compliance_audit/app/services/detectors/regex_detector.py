@@ -13,6 +13,7 @@ Detection categories kept here:
   • RX005 — Bulk data export / DB dump commands        (SQL patterns)
   • RX007 — Unencrypted data transmission              (protocol URLs)
   • RX008 — Hardcoded secrets / tokens in logs         (key formats)
+  • RX011 — Critical Compliance File Modification      (File paths)
 """
 
 import re
@@ -87,6 +88,21 @@ RULES = [
         "patterns": [
             re.compile(r"\b(api[_-]?key\s*[:=]\s*['\"]?\w{16,}|password\s*[:=]\s*['\"]?\S{6,}|secret\s*[:=]\s*['\"]?\S{6,}|token\s*[:=]\s*['\"]?\S{16,})\b", re.IGNORECASE),
             re.compile(r"(AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|sk-[A-Za-z0-9]{32})"),  # AWS / GitHub / OpenAI key formats
+        ],
+    },
+    {
+        "rule_id":    "RX011",
+        "title":      "Modification of Critical Compliance or Security File",
+        "severity":   "HIGH",
+        "frameworks": {
+            "ISO27001": "A.12.1.2",
+            "SOC2":     "CC8.1",
+            "HIPAA":    "164.312(b)",
+            "GDPR":     None,
+        },
+        "remediation": "Review changes to security policies or CI/CD configurations. Require secondary approval and notify the compliance team.",
+        "patterns": [
+            re.compile(r"\b(SECURITY\.md|\.github/CODEOWNERS|policy\.json|audit_config\.yml|\.github/workflows/security\.yml|compliance\.md|SOC2_report\.pdf)\b", re.IGNORECASE),
         ],
     },
 ]

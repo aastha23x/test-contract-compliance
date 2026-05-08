@@ -11,6 +11,7 @@ Handles:
   • SP006 — Scan bypass / change mgmt skipped     (PhraseMatcher)
   • SP009 — Wildcard / excessive permissions      (PhraseMatcher)
   • SP010 — Geo / time anomalies                  (PhraseMatcher + NER)
+  • SP012 — Compliance policy bypass requested    (PhraseMatcher)
 
 NER extraction (en_core_web_sm):
   • PERSON / ORG  → enriches user_involved field
@@ -163,6 +164,25 @@ PHRASE_RULES = [
             "outside business hours", "unusual activity", "geographic anomaly",
         ],
     },
+    {
+        "rule_id":   "SP012",
+        "title":     "Compliance Policy Exception or Bypass Requested",
+        "severity":  "HIGH",
+        "frameworks": {
+            "ISO27001": "A.18.1.4 – Privacy and Protection of PII",
+            "SOC2":     "CC6.1 – Logical Access Controls",
+            "HIPAA":    None,
+            "GDPR":     None,
+        },
+        "remediation": (
+            "Verify the legitimacy of the exception request. Ensure temporary bypasses "
+            "are properly documented, time-bound, and approved by the security team."
+        ),
+        "phrases": [
+            "policy exception", "compliance bypass", "override security", "ignore policy",
+            "temporary bypass", "disable audit log", "bypass compliance", "exception requested"
+        ],
+    },
 ]
 
 
@@ -182,6 +202,9 @@ ENTITY_RULER_PATTERNS = [
     {"label": "POLICY_BYPASS",  "pattern": "bypass scan"},
     {"label": "POLICY_BYPASS",  "pattern": "skip review"},
     {"label": "POLICY_BYPASS",  "pattern": "override approval"},
+    {"label": "POLICY_BYPASS",  "pattern": "compliance bypass"},
+    {"label": "POLICY_BYPASS",  "pattern": "temporary bypass"},
+    {"label": "POLICY_BYPASS",  "pattern": "policy exception"},
 ]
 
 # Add EntityRuler before the default NER so custom entities take precedence

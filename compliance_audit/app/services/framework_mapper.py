@@ -1,5 +1,9 @@
 from datetime import datetime
 import json
+from app.agents.iso27001_agent import ISO27001Agent
+from app.agents.soc2_agent import SOC2Agent
+from app.agents.hipaa_agent import HIPAAAgent
+from app.agents.gdpr_agent import GDPRAgent
 
 # ── Framework rules reference ──────────────────────────────────
 FRAMEWORK_CONTROLS = {
@@ -48,23 +52,30 @@ def build_framework_map(violations):
         "GDPR":     {}
     }
 
+    agents = {
+        "ISO27001": ISO27001Agent(),
+        "SOC2":     SOC2Agent(),
+        "HIPAA":    HIPAAAgent(),
+        "GDPR":     GDPRAgent()
+    }
+
     for v in violations:
-        frameworks = v.get("frameworks", {})
-        for fw, control in frameworks.items():
-            if not control or control == "null":
-                continue
-            if fw not in framework_map:
-                continue
-            if control not in framework_map[fw]:
-                framework_map[fw][control] = []
-            framework_map[fw][control].append({
-                "id":          v.get("id"),
-                "title":       v.get("title"),
-                "severity":    v.get("severity"),
-                "source":      v.get("source"),
-                "user":        v.get("user_involved", "N/A"),
-                "remediation": v.get("remediation")
-            })
+        # Clear out any old rule-engine frameworks and rely solely on the Agent mappings
+        v["frameworks"] = {}
+        for fw, agent in agents.items():
+            control_string = agent.map(v)
+            if control_string:
+                v["frameworks"][fw] = control_string
+                if control_string not in framework_map[fw]:
+                    framework_map[fw][control_string] = []
+                framework_map[fw][control_string].append({
+                    "id":          v.get("id"),
+                    "title":       v.get("title"),
+                    "severity":    v.get("severity"),
+                    "source":      v.get("source"),
+                    "user":        v.get("user_involved", "N/A"),
+                    "remediation": v.get("remediation")
+                })
 
     return framework_map
 
