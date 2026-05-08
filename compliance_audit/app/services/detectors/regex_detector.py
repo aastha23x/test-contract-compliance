@@ -4,7 +4,7 @@ regex_detector.py — Structural-Pattern Compliance Detector (Layer A2)
 Scans GitHub webhook payloads using deterministic regex for STRUCTURAL
 patterns that NLP cannot reliably handle: IP ranges, SQL commands,
 protocol URLs, hardcoded secret formats, and sensitive file paths.
-
+ 
 Detection categories:
   • RX002 — Public / open firewall / network exposure  (IP patterns)
   • RX005 — Bulk data export / DB dump commands        (SQL patterns)
@@ -12,23 +12,21 @@ Detection categories:
   • RX008 — Hardcoded secrets / tokens in code         (key formats)
   • RX011 — Critical compliance/security file modified (file paths)
 """
-
+ 
 import re
 from datetime import datetime
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════════════
-
-# GitHub's own infrastructure domains — never flag these as unencrypted
+ 
 _SAFE_HTTP_DOMAINS = frozenset([
     "api.github.com", "github.com", "raw.githubusercontent.com",
     "avatars.githubusercontent.com", "codeload.github.com",
     "objects.githubusercontent.com",
 ])
-
-# Critical file patterns — matches filenames and paths in commit diffs
+ 
 _CRITICAL_FILE_RE = re.compile(
     r"(SECURITY\.md|\.github/CODEOWNERS|policy\.json|audit_config\.yml"
     r"|\.github/workflows/[\w\-]+security[\w\-]*\.yml"
@@ -37,8 +35,7 @@ _CRITICAL_FILE_RE = re.compile(
     r"|\.aws/credentials|id_rsa|id_ed25519)",
     re.IGNORECASE,
 )
-
-# ── Rule definitions ──────────────────────────────────────────────────
+ 
 RULES = [
     {
         "rule_id":   "RX002",
@@ -101,7 +98,6 @@ RULES = [
             "Enforce TLS 1.2+ for all data in transit, enable encryption at rest "
             "(AES-256), and rotate keys regularly."
         ),
-        # Evaluated per-field with domain allowlist — see _check_unencrypted()
         "patterns": [
             re.compile(
                 r"\b(no[\s_-]?TLS|encryption[\s_-]?disabled|no[\s_-]?ssl"
@@ -110,7 +106,6 @@ RULES = [
                 re.IGNORECASE,
             ),
         ],
-        # Separate pattern for http:// URLs — filtered by domain allowlist
         "_url_pattern": re.compile(r"http://([^\s/\"']+)", re.IGNORECASE),
     },
     {
@@ -129,7 +124,6 @@ RULES = [
             "(Vault / AWS Secrets Manager / GitHub Secrets)."
         ),
         "patterns": [
-            # Tighter: requires non-word char boundary after value to reduce false positives
             re.compile(
                 r"\b(api[_-]?key\s*[:=]\s*['\"]?\w{20,}"
                 r"|password\s*[:=]\s*['\"][^\s'\"]{8,}['\"]"
@@ -137,7 +131,6 @@ RULES = [
                 r"|token\s*[:=]\s*['\"][^\s'\"]{16,}['\"])\b",
                 re.IGNORECASE,
             ),
-            # Provider-specific key formats (high confidence, no false positives)
             re.compile(
                 r"(AKIA[0-9A-Z]{16}"           # AWS access key
                 r"|ASIA[0-9A-Z]{16}"           # AWS STS key
@@ -164,36 +157,30 @@ RULES = [
             "Review the file change immediately. Require secondary approval for "
             "all security/compliance file modifications and notify the compliance team."
         ),
-        # RX011 is evaluated separately via _check_modified_files() which reads
-        # the structured commits[].added/modified/removed arrays directly.
         "patterns": [],
     },
 ]
-
-# Build a quick lookup by rule_id
+ 
 RULES_BY_ID = {r["rule_id"]: r for r in RULES}
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════
-
+ 
 def _extract_user(payload: dict) -> str:
     """Extract the acting user from a GitHub webhook payload."""
-    # PR event
     if isinstance(payload.get("pull_request"), dict):
         login = payload["pull_request"].get("user", {}).get("login", "")
         if login:
             return login
-    # Generic sender field
     if isinstance(payload.get("sender"), dict):
         return payload["sender"].get("login", "Unknown")
-    # Pusher
     if isinstance(payload.get("pusher"), dict):
         return payload["pusher"].get("name", "Unknown")
     return "Unknown"
-
-
+ 
+ 
 def _extract_timestamp(payload: dict) -> str:
     """Extract the best available timestamp from a GitHub webhook payload."""
     candidates = [
@@ -206,8 +193,8 @@ def _extract_timestamp(payload: dict) -> str:
         if ts:
             return str(ts)
     return datetime.utcnow().isoformat()
-
-
+ 
+ 
 def _flatten_field(value, max_depth: int = 6, _depth: int = 0) -> str:
     """
     Recursively stringify a value for regex scanning.
@@ -220,8 +207,8 @@ def _flatten_field(value, max_depth: int = 6, _depth: int = 0) -> str:
     if isinstance(value, list):
         return " ".join(_flatten_field(i, max_depth, _depth + 1) for i in value)
     return str(value)
-
-
+ 
+ 
 def _scan_fields(payload: dict, fields: list[str]) -> dict[str, str]:
     """
     Extract specific top-level fields from payload as flat strings.
@@ -233,29 +220,28 @@ def _scan_fields(payload: dict, fields: list[str]) -> dict[str, str]:
         if value is not None:
             result[field] = _flatten_field(value)
     return result
-
-
+ 
+ 
 def _find_match(patterns: list, text: str) -> str | None:
     """Return the first matched string, or None if no pattern matches."""
     for p in patterns:
         m = p.search(text)
         if m:
-            return m.group(0)[:120]  # cap at 120 chars for display
+            return m.group(0)[:120]
     return None
-
-
+ 
+ 
 def _check_unencrypted(payload: dict, rule: dict) -> str | None:
     """
     RX007-specific check. Returns matched text or None.
     Applies domain allowlist to http:// URLs to avoid flagging GitHub's own URLs.
+    Also scans fetched file contents via _scannable_text.
     """
-    # Check keyword patterns first (no allowlist needed)
     scan_text = _flatten_field(payload)
     match = _find_match(rule["patterns"], scan_text)
     if match:
         return match
-
-    # Check for http:// URLs, filtering out safe GitHub domains
+ 
     url_pattern = rule.get("_url_pattern")
     if url_pattern:
         for m in url_pattern.finditer(scan_text):
@@ -263,8 +249,8 @@ def _check_unencrypted(payload: dict, rule: dict) -> str | None:
             if domain not in _SAFE_HTTP_DOMAINS:
                 return m.group(0)[:120]
     return None
-
-
+ 
+ 
 def _check_modified_files(payload: dict) -> list[str]:
     """
     RX011: Extract all modified/added/removed file paths from push commit data.
@@ -274,7 +260,7 @@ def _check_modified_files(payload: dict) -> list[str]:
     commits = payload.get("commits", [])
     if not commits and payload.get("head_commit"):
         commits = [payload["head_commit"]]
-
+ 
     for commit in commits:
         if not isinstance(commit, dict):
             continue
@@ -286,90 +272,90 @@ def _check_modified_files(payload: dict) -> list[str]:
         for filepath in all_files:
             if _CRITICAL_FILE_RE.search(str(filepath)):
                 matched_files.append(filepath)
-
-    # Also check PR changed_files description if present
+ 
     pr = payload.get("pull_request", {})
     if isinstance(pr, dict):
         pr_body = pr.get("body", "") or ""
         if _CRITICAL_FILE_RE.search(pr_body):
             matched_files.append("(mentioned in PR body)")
-
-    return list(set(matched_files))  # deduplicate
-
-
+ 
+    return list(set(matched_files))
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════
 #  MAIN DETECTOR
 # ══════════════════════════════════════════════════════════════════════
-
+ 
 def run_regex_detector(data: dict) -> list[dict]:
     """
     Scan GitHub webhook payloads with regex rules.
-
+ 
     Args:
         data: dict of {repo_name: [list of payload dicts]}
-
+ 
     Returns:
         List of violation dicts.
     """
     violations   = []
-    seen_combos  = set()   # (rule_id, repo_name, commit_sha) — proper dedup key
+    seen_combos  = set()
     violation_id = 1
-
+ 
     for repo_name, payloads in data.items():
         for payload in payloads:
-            # Use commit SHA or PR number as a stable doc identifier
             doc_id = (
-                payload.get("after")                                           # push SHA
-                or str(payload.get("pull_request", {}).get("number", ""))     # PR number
+                payload.get("after")
+                or str(payload.get("pull_request", {}).get("number", ""))
                 or payload.get("delivery", "unknown")
             )
             user_info = _extract_user(payload)
             timestamp = _extract_timestamp(payload)
-
-            # ── RX002, RX005, RX008: scan high-signal fields only ──────
-            # Scanning the entire flattened payload for secrets hits too many
-            # false positives from GitHub metadata. Focus on user-controlled fields.
+ 
+            # ── High-signal text: user content + fetched file contents ─
+            # _scannable_text is injected by github_fetcher.py and contains
+            # the actual code of all changed files. This is the primary
+            # source for secret/SQL/PII detection. Without it, detectors
+            # only see commit metadata and miss all code-level violations.
             high_signal_fields = _scan_fields(payload, [
                 "commits", "head_commit", "pull_request",
                 "comment", "issue", "review",
+                "_scannable_text",   # ← actual file contents from GitHub API
             ])
             high_signal_text = " ".join(high_signal_fields.values())
-
-            # Full payload text for network/firewall rules (RX002) since those
-            # patterns appear in config/infra fields GitHub sends
+ 
+            # Full payload text for network/firewall rules — includes infra
+            # configs and also picks up _scannable_text via recursive flatten
             full_text = _flatten_field(payload)
-
+ 
             for rule in RULES:
                 rule_id   = rule["rule_id"]
                 combo_key = (rule_id, repo_name, str(doc_id))
                 if combo_key in seen_combos:
                     continue
-
+ 
                 matched_text = None
-
-                # ── Per-rule scan strategy ─────────────────────────
+ 
                 if rule_id == "RX002":
                     matched_text = _find_match(rule["patterns"], full_text)
-
+ 
                 elif rule_id == "RX005":
                     matched_text = _find_match(rule["patterns"], high_signal_text)
-
+ 
                 elif rule_id == "RX007":
                     matched_text = _check_unencrypted(payload, rule)
-
+ 
                 elif rule_id == "RX008":
                     matched_text = _find_match(rule["patterns"], high_signal_text)
-
+ 
                 elif rule_id == "RX011":
                     critical_files = _check_modified_files(payload)
                     if critical_files:
                         matched_text = ", ".join(critical_files[:5])
-
+ 
                 if matched_text is None:
                     continue
-
+ 
                 seen_combos.add(combo_key)
-
+ 
                 violations.append({
                     "id":           f"RX{violation_id:03d}",
                     "detection":    "REGEX",
@@ -385,57 +371,49 @@ def run_regex_detector(data: dict) -> list[dict]:
                     "timestamp":    timestamp,
                     "frameworks":   rule["frameworks"],
                     "remediation":  rule["remediation"],
-                    "matched_text": matched_text,   # passed to LLM for richer enrichment
+                    "matched_text": matched_text,
                 })
                 violation_id += 1
-
+ 
     return violations
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════
 #  MERGE — combine spaCy + regex violations, deduplicating by rule_id
 # ══════════════════════════════════════════════════════════════════════
-
+ 
 def merge_violations(spacy_violations: list[dict], regex_violations: list[dict]) -> list[dict]:
-    """
-    Merge spaCy and regex results.
-    Strategy:
-      - Deduplicate by rule_id: if the same underlying rule fired in both
-        detectors, keep the one with more detail (matched_text > none).
-      - Re-index all violations V001, V002, … in severity order.
-    """
     seen_rule_ids: dict[str, dict] = {}
-
+ 
     for v in spacy_violations + regex_violations:
         rid = v.get("rule_id", v.get("id", ""))
         if rid not in seen_rule_ids:
             seen_rule_ids[rid] = v
         else:
-            # Prefer the one that captured matched_text
             existing = seen_rule_ids[rid]
             if v.get("matched_text") and not existing.get("matched_text"):
                 seen_rule_ids[rid] = v
-
+ 
     merged    = list(seen_rule_ids.values())
     sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     merged.sort(key=lambda x: sev_order.get(x.get("severity", "LOW"), 3))
-
+ 
     for i, v in enumerate(merged, 1):
         v["id"] = f"V{i:03d}"
-
+ 
     return merged
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════
 #  REBUILD SUMMARY after merge
 # ══════════════════════════════════════════════════════════════════════
-
+ 
 def rebuild_summary(violations: list[dict]) -> dict:
     counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for v in violations:
         sev = v.get("severity", "LOW")
         counts[sev] = counts.get(sev, 0) + 1
-
+ 
     deductions = (
         counts["CRITICAL"] * 25 +
         counts["HIGH"]     * 15 +
@@ -449,7 +427,7 @@ def rebuild_summary(violations: list[dict]) -> dict:
         "MEDIUM"   if score < 80 else
         "LOW"
     )
-
+ 
     return {
         "total_violations": len(violations),
         "critical":         counts["CRITICAL"],
@@ -462,33 +440,32 @@ def rebuild_summary(violations: list[dict]) -> dict:
         "spacy_detections": sum(1 for v in violations if v.get("detection") == "SPACY"),
         "regex_detections": sum(1 for v in violations if v.get("detection") == "REGEX"),
     }
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════════════
-#  STANDALONE ENTRY POINT — test against a local webhook_data.json
+#  STANDALONE ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════
-
+ 
 if __name__ == "__main__":
     import os
     import json
-
+ 
     ROOT         = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     WEBHOOK_FILE = os.path.join(ROOT, "webhook_data.json")
-
+ 
     if not os.path.exists(WEBHOOK_FILE):
         print(f"❌ No webhook_data.json found at {WEBHOOK_FILE}")
         raise SystemExit(1)
-
+ 
     with open(WEBHOOK_FILE) as f:
         raw = json.load(f)
-
+ 
     entries = raw if isinstance(raw, list) else [{"payload": raw}]
-    data: dict[str, list] = {}
-    for entry in entries:
-        payload   = entry.get("payload", entry)
-        repo_name = payload.get("repository", {}).get("full_name", "GITHUB_WEBHOOK")
-        data.setdefault(repo_name, []).append(payload)
-
+    latest  = entries[-1]
+    payload = latest.get("payload", latest)
+    repo    = payload.get("repository", {}).get("full_name", "GITHUB_WEBHOOK")
+    data: dict[str, list] = {repo: [payload]}
+ 
     print("🔍 Running standalone regex detector...\n")
     results = run_regex_detector(data)
     print(f"✅ Regex detector found {len(results)} violation(s):\n")
