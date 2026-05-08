@@ -48,11 +48,11 @@ DASHBOARD_HTML = """
 
     :root {
 
-      --bg:          #f7f4f0;
+      --bg:          #f5efff;
 
       --bg2:         #efe9e1;
 
-      --surface:     #ffffff;
+      --surface:     #f8e8ee;
 
       --surface2:    #faf7f4;
 
