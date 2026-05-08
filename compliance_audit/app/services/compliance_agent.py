@@ -5,18 +5,24 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 
-# ── Hybrid layer: deterministic regex detector ────────────────
+# ── Hybrid layer: deterministic detectors ────────────────────
 from app.services.detectors.spacy_detector import run_spacy_detector
 from app.services.detectors.regex_detector import run_regex_detector, merge_violations, rebuild_summary
 
-# ── Load environment variables ─────────────────────────────────
+# ── Load environment variables ────────────────────────────────
 load_dotenv()
 
 AZURE_API_KEY = os.getenv("AZURE_API_KEY")
 AZURE_API_URL = os.getenv("AZURE_API_URL")
-# Removed MongoDB connection since we are using GitHub Webhooks
 
-# ── Serialize nested datetimes recursively ─────────────────────
+# ── Absolute path anchors ─────────────────────────────────────
+# app/services/compliance_agent.py → go up two levels to reach project root
+ROOT          = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+WEBHOOK_DATA  = os.path.join(ROOT, "webhook_data.json")
+VIOLATION_OUT = os.path.join(ROOT, "violation_report.json")
+
+
+# ── Serialize nested datetimes recursively ────────────────────
 def serialize(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
@@ -26,35 +32,60 @@ def serialize(obj):
         return [serialize(i) for i in obj]
     return obj
 
-# ── Fetch webhook data ──────────────────────────────────────────
+
+# ── Fetch webhook data ────────────────────────────────────────
 def fetch_all_data():
-    if os.path.exists("webhook_data.json"):
-        with open("webhook_data.json", "r") as f:
-            data = json.load(f)
-        repo_name = data.get("repository", {}).get("full_name", "GITHUB_WEBHOOK")
-        return {repo_name: [data]}
-    else:
-        print("⚠️ No webhook_data.json found. Waiting for GitHub webhook data.")
+    """
+    Reads webhook_data.json and returns a dict of {repo_name: [payloads]}.
+    Handles both the new list format (written by webhook_server.py)
+    and the legacy single-object format for backwards compatibility.
+    """
+    if not os.path.exists(WEBHOOK_DATA):
+        print(f"⚠️  No webhook_data.json found at {WEBHOOK_DATA}. Waiting for GitHub webhook data.")
         return {"GITHUB_WEBHOOK": []}
 
-# ── Build prompt ───────────────────────────────────────────────
-def build_prompt(data, base_violations):
-    # Prepare a minimal summary of base violations for the LLM
+    with open(WEBHOOK_DATA, "r") as f:
+        raw = json.load(f)
+
+    # Normalise: always work with a list of event dicts
+    if isinstance(raw, list):
+        events = raw  # new format: list of {event_type, received_at, payload}
+    else:
+        events = [{"payload": raw}]  # legacy format: bare payload object
+
+    # Group by repo so downstream detectors get {repo: [payloads]}
+    grouped: dict[str, list] = {}
+    for entry in events:
+        # new format wraps payload under "payload" key; legacy is the payload itself
+        payload   = entry.get("payload", entry)
+        repo_name = payload.get("repository", {}).get("full_name", "GITHUB_WEBHOOK")
+        grouped.setdefault(repo_name, []).append(payload)
+
+    total = sum(len(v) for v in grouped.values())
+    print(f"   Loaded {total} event(s) from {WEBHOOK_DATA}")
+    return grouped
+
+
+# ── Build prompt ──────────────────────────────────────────────
+def build_prompt(data: dict, base_violations: list) -> str:
     v_summary = []
     for v in base_violations:
         v_summary.append({
-            "id": v["id"],
-            "title": v["title"],
-            "rule_id": v["rule_id"],
-            "source": v["source"],
-            "severity": v["severity"],
-            "user_involved": v.get("user_involved"),
-            "timestamp": v.get("timestamp"),
-            "basic_description": v["description"]
+            "id":                v["id"],
+            "title":             v["title"],
+            "rule_id":           v["rule_id"],
+            "source":            v["source"],
+            "severity":          v["severity"],
+            "user_involved":     v.get("user_involved"),
+            "timestamp":         v.get("timestamp"),
+            "basic_description": v["description"],
         })
 
+    # Flatten all payloads into a single list for the LLM
+    all_payloads = [p for payloads in data.values() for p in payloads]
+
     return """
-You are an expert AI Compliance and Security Audit Agent. 
+You are an expert AI Compliance and Security Audit Agent.
 
 Our deterministic rule engine (regex/spaCy) has already scanned the GitHub webhook data and identified the following compliance violations.
 Your task is to ENRICH these existing violations with highly detailed, contextual explanations and precise remediation steps.
@@ -85,27 +116,28 @@ BASE VIOLATIONS:
 """ + json.dumps(v_summary, indent=2) + """
 
 GITHUB WEBHOOK PAYLOAD:
-""" + json.dumps(list(data.values())[0] if data else [], indent=2)
+""" + json.dumps(all_payloads, indent=2)
 
-# ── Call Azure OpenAI API ──────────────────────────────────────
-def run_compliance_agent(prompt):
+
+# ── Call Azure OpenAI API ─────────────────────────────────────
+def run_compliance_agent(prompt: str) -> str | None:
     headers = {
         "Content-Type": "application/json",
-        "api-key": AZURE_API_KEY
+        "api-key": AZURE_API_KEY,
     }
     body = {
         "messages": [
             {
                 "role": "system",
-                "content": "You are an expert AI compliance and security audit agent. Always respond with valid JSON only."
+                "content": "You are an expert AI compliance and security audit agent. Always respond with valid JSON only.",
             },
             {
                 "role": "user",
-                "content": prompt
-            }
+                "content": prompt,
+            },
         ],
         "temperature": 0.1,
-        "max_tokens": 8192
+        "max_tokens":  8192,
     }
 
     print("🤖 Calling Azure OpenAI API...")
@@ -125,6 +157,7 @@ def run_compliance_agent(prompt):
     result = response.json()
     return result["choices"][0]["message"]["content"]
 
+
 # ── Parse raw LLM response string → Python dict ───────────────
 def parse_llm_response(result_json: str) -> dict | None:
     """Strip markdown fences and parse JSON. Returns None on failure."""
@@ -141,44 +174,44 @@ def parse_llm_response(result_json: str) -> dict | None:
         print(result_json)
         return None
 
-# ── Build summary ───────────────────────────────────────────────
+
+# ── Build summary ─────────────────────────────────────────────
 def build_summary(violations: list[dict], spacy_count: int, regex_count: int) -> dict:
     counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     for v in violations:
         sev = v.get("severity", "LOW")
         counts[sev] = counts.get(sev, 0) + 1
 
-    total = len(violations)
-    # Score: start 100, deduct per severity
-    deductions = counts["CRITICAL"] * 25 + counts["HIGH"] * 15 + counts["MEDIUM"] * 8 + counts["LOW"] * 3
+    deductions = (
+        counts["CRITICAL"] * 25 +
+        counts["HIGH"]     * 15 +
+        counts["MEDIUM"]   *  8 +
+        counts["LOW"]      *  3
+    )
     score = max(0, 100 - deductions)
-
-    if score < 40:
-        risk = "CRITICAL"
-    elif score < 60:
-        risk = "HIGH"
-    elif score < 80:
-        risk = "MEDIUM"
-    else:
-        risk = "LOW"
+    risk  = (
+        "CRITICAL" if score < 40 else
+        "HIGH"     if score < 60 else
+        "MEDIUM"   if score < 80 else
+        "LOW"
+    )
 
     return {
-        "total_violations":  total,
-        "critical":          counts["CRITICAL"],
-        "high":              counts["HIGH"],
-        "medium":            counts["MEDIUM"],
-        "low":               counts["LOW"],
-        "compliance_score":  score,
-        "overall_risk":      risk,
-        "llm_detections":    0, # LLM no longer detects, only enriches
-        "spacy_detections":  spacy_count,
-        "regex_detections":  regex_count,
+        "total_violations": len(violations),
+        "critical":         counts["CRITICAL"],
+        "high":             counts["HIGH"],
+        "medium":           counts["MEDIUM"],
+        "low":              counts["LOW"],
+        "compliance_score": score,
+        "overall_risk":     risk,
+        "llm_detections":   0,   # LLM enriches only, does not detect
+        "spacy_detections": spacy_count,
+        "regex_detections": regex_count,
     }
 
 
-# ── Print violations ───────────────────────────────────────────
+# ── Print violations ──────────────────────────────────────────
 def print_results(violations: list, summary: dict):
-    """Pretty-print the merged violation report to stdout."""
     print("\n" + "=" * 70)
     print("   HYBRID COMPLIANCE AGENT - VIOLATION REPORT")
     print("   (Rule Engine Detection + LLM Enrichment)")
@@ -205,9 +238,8 @@ def print_results(violations: list, summary: dict):
             else " [REGEX] " if v.get("detection") == "REGEX"
             else " [RULE]  "
         )
-        severity = v.get("severity", "")
         print(f"\n[{v.get('id')}]{tag} {v.get('title')}")
-        print(f"   Severity   : {severity}")
+        print(f"   Severity   : {v.get('severity', '')}")
         print(f"   Source     : {v.get('source')}")
         print(f"   User       : {v.get('user_involved', 'N/A')}")
         print(f"   Timestamp  : {v.get('timestamp', 'N/A')}")
@@ -218,37 +250,36 @@ def print_results(violations: list, summary: dict):
     print("   Compliance scan complete!")
     print("=" * 70 + "\n")
 
-# ── Main ───────────────────────────────────────────────────────
+
+# ── Main ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("📦 Fetching data from GitHub Webhook payload...")
     data  = fetch_all_data()
     total = sum(len(v) for v in data.values())
     print(f"✅ Loaded {total} event(s) from webhook\n")
 
-    # ── Layer A1: spaCy NLP detector (phrase match + NER) ──────────────
+    # ── Layer A1: spaCy NLP detector ──────────────────────────
     print("🧠 Running spaCy Detector (Layer A1 — NLP phrases + NER)...")
     spacy_violations = run_spacy_detector(data)
     print(f"   spaCy found {len(spacy_violations)} violation(s)\n")
 
-    # ── Layer A2: Regex detector (structural patterns only) ────────────
+    # ── Layer A2: Regex detector ──────────────────────────────
     print("🔎 Running Regex Detector (Layer A2 — structural patterns)...")
     regex_violations = run_regex_detector(data)
     print(f"   Regex found {len(regex_violations)} violation(s)\n")
 
-    # Combine deterministic violations
     base_violations = spacy_violations + regex_violations
 
     if not base_violations:
         print("✅ No violations found by rule engines. Skipping LLM enrichment.\n")
         final_violations = []
     else:
-        # ── Layer B: LLM Context Enrichment ──────────────────────────────────
+        # ── Layer B: LLM Context Enrichment ───────────────────
         print(f"🤖 Running LLM Enrichment on {len(base_violations)} violation(s)...")
-        prompt = build_prompt(data, base_violations)
-        llm_raw = run_compliance_agent(prompt)
+        prompt     = build_prompt(data, base_violations)
+        llm_raw    = run_compliance_agent(prompt)
         llm_parsed = parse_llm_response(llm_raw) if llm_raw else None
-        
-        # Merge LLM descriptions back into base_violations
+
         if llm_parsed and "violations" in llm_parsed:
             enriched_map = {v["id"]: v for v in llm_parsed["violations"]}
             for v in base_violations:
@@ -256,10 +287,10 @@ if __name__ == "__main__":
                     ev = enriched_map[v["id"]]
                     v["description"] = ev.get("description", v["description"])
                     v["remediation"] = ev.get("remediation", v.get("remediation", ""))
-        
+
         final_violations = base_violations
-        
-        # Re-sort and re-index
+
+        # Re-sort by severity and re-index
         sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
         final_violations.sort(key=lambda x: sev_order.get(x.get("severity", "LOW"), 3))
         for i, v in enumerate(final_violations, 1):
@@ -267,14 +298,13 @@ if __name__ == "__main__":
 
     final_summary = build_summary(final_violations, len(spacy_violations), len(regex_violations))
 
-    # ── Print & save ───────────────────────────────────────────
+    # ── Print & save ──────────────────────────────────────────
     print_results(final_violations, final_summary)
 
     final_report = {
         "violations": final_violations,
         "summary":    final_summary,
     }
-    with open("violation_report.json", "w") as f:
-        json.dump(final_report, f, indent=2)
-    print("📄 Full hybrid report saved to: violation_report.json")
-
+    with open(VIOLATION_OUT, "w") as f:
+        json.dump(serialize(final_report), f, indent=2)
+    print(f"📄 Full hybrid report saved to: {VIOLATION_OUT}")

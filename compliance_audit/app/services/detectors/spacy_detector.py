@@ -2,10 +2,10 @@
 spacy_detector.py — NLP-Based Compliance Violation Detector (Layer A1)
 ────────────────────────────────────────────────────────────────────────
 Uses spaCy PhraseMatcher, EntityRuler, and NER to detect compliance
-violations from natural language fields in MongoDB documents.
+violations from natural language fields in GitHub webhook payloads.
 
 Handles:
-  • SP001 — Privilege escalation / admin access   (PhraseMatcher)
+  • SP001 — Privilege escalation / admin access   (PhraseMatcher + context)
   • SP003 — PII / sensitive data access           (PhraseMatcher + EntityRuler)
   • SP004 — MFA failures / auth anomalies         (PhraseMatcher)
   • SP006 — Scan bypass / change mgmt skipped     (PhraseMatcher)
@@ -17,29 +17,33 @@ NER extraction (en_core_web_sm):
   • PERSON / ORG  → enriches user_involved field
   • DATE / TIME   → enriches timestamp field
   • GPE           → geographic context in descriptions
+
+Design decisions:
+  • spaCy model is lazy-loaded on first call — import never crashes.
+  • Single-word high-FP phrases (admin, root, sudo) require an action
+    verb nearby to confirm intent before firing.
+  • Matched phrase is captured and included in violation description.
+  • Scans only user-controlled text fields, not GitHub metadata fields.
 """
 
-import spacy
-from spacy.matcher import PhraseMatcher
 from datetime import datetime
+from typing import Optional
+
+# ── Lazy globals — populated on first call to run_spacy_detector() ───
+_nlp     = None
+_matcher = None
+_rule_phrase_map: dict = {}
 
 
-# ── Load spaCy model ──────────────────────────────────────────────────
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    raise OSError(
-        "spaCy model 'en_core_web_sm' not found.\n"
-        "Run: python3 -m spacy download en_core_web_sm"
-    )
+# ══════════════════════════════════════════════════════════════════════
+#  RULE DEFINITIONS
+# ══════════════════════════════════════════════════════════════════════
 
-
-# ── Rule definitions (keyword/phrase-based rules only) ─────────────────
 PHRASE_RULES = [
     {
-        "rule_id":   "SP001",
-        "title":     "Privilege escalation or admin role granted",
-        "severity":  "CRITICAL",
+        "rule_id":  "SP001",
+        "title":    "Privilege escalation or admin role granted",
+        "severity": "CRITICAL",
         "frameworks": {
             "ISO27001": "A.9.2.3 – Management of Privileged Access Rights",
             "SOC2":     "CC6.1 – Logical Access Controls",
@@ -48,19 +52,27 @@ PHRASE_RULES = [
         },
         "remediation": (
             "Revoke elevated privileges immediately, audit role change history, "
-            "enforce least-privilege policy."
+            "enforce least-privilege policy and require approval for all role changes."
         ),
+        # Multi-word phrases only — single words (admin, root) cause too many
+        # false positives (root cause analysis, admin panel link, etc.)
+        # Single-word terms are handled separately with context check below.
         "phrases": [
-            "admin", "root", "superuser", "sudo", "privilege escalation",
-            "role granted", "elevated access", "admin role", "escalated privileges",
-            "administrator access", "root access", "superadmin", "admin access",
-            "privilege grant", "role escalation",
+            "privilege escalation", "role granted", "elevated access",
+            "admin role", "escalated privileges", "administrator access",
+            "root access", "superadmin", "admin access granted",
+            "privilege grant", "role escalation", "sudo access",
+            "superuser access", "escalate privilege",
         ],
+        # Single-word phrases that require an action verb nearby to confirm intent
+        "_context_phrases": ["admin", "root", "superuser", "sudo"],
+        "_context_verbs":   ["grant", "granted", "assign", "assigned", "add", "added",
+                             "escalat", "elevat", "promoted", "given", "enable", "enabled"],
     },
     {
-        "rule_id":   "SP003",
-        "title":     "PII or sensitive data accessed or exported",
-        "severity":  "HIGH",
+        "rule_id":  "SP003",
+        "title":    "PII or sensitive data accessed or exported",
+        "severity": "HIGH",
         "frameworks": {
             "ISO27001": "A.18.1.4 – Privacy and Protection of PII",
             "SOC2":     "CC6.1 – Logical Access Controls",
@@ -69,20 +81,20 @@ PHRASE_RULES = [
         },
         "remediation": (
             "Restrict PII field access to authorised roles, mask sensitive fields "
-            "in logs, enable field-level encryption."
+            "in logs, enable field-level encryption, and audit the access event."
         ),
         "phrases": [
-            "PII", "personal data", "SSN", "social security", "passport",
-            "credit card", "PHI", "patient data", "medical record",
-            "sensitive data", "GDPR data", "personally identifiable",
-            "health information", "protected health", "personal information",
-            "private data", "confidential data",
+            "PII", "personal data", "SSN", "social security number", "passport number",
+            "credit card", "PHI", "patient data", "medical record", "medical records",
+            "sensitive data", "personally identifiable", "health information",
+            "protected health", "personal information", "private data",
+            "confidential data", "GDPR data", "data subject",
         ],
     },
     {
-        "rule_id":   "SP004",
-        "title":     "MFA not enforced or authentication failure",
-        "severity":  "HIGH",
+        "rule_id":  "SP004",
+        "title":    "MFA not enforced or authentication failure",
+        "severity": "HIGH",
         "frameworks": {
             "ISO27001": "A.9.2.3 – Management of Privileged Access Rights",
             "SOC2":     "CC6.1 – Logical Access Controls",
@@ -91,20 +103,21 @@ PHRASE_RULES = [
         },
         "remediation": (
             "Enable MFA for all privileged accounts, investigate repeated auth "
-            "failures, block suspicious IPs."
+            "failures, block suspicious IPs, and alert the security team."
         ),
         "phrases": [
-            "no MFA", "MFA disabled", "MFA not enabled", "failed login",
-            "auth failure", "authentication failed", "login attempt",
-            "brute force", "invalid credentials", "multiple failed",
+            "no MFA", "MFA disabled", "MFA not enabled", "MFA bypass",
+            "failed login", "auth failure", "authentication failed",
+            "brute force", "invalid credentials", "multiple failed attempts",
             "authentication error", "login failed", "password failure",
-            "account locked", "too many attempts",
+            "account locked", "too many attempts", "credential stuffing",
+            "2FA disabled", "two factor disabled",
         ],
     },
     {
-        "rule_id":   "SP006",
-        "title":     "Security scan skipped or change management bypassed",
-        "severity":  "HIGH",
+        "rule_id":  "SP006",
+        "title":    "Security scan skipped or change management bypassed",
+        "severity": "HIGH",
         "frameworks": {
             "ISO27001": "A.14.2.4 – Secure Development Policy",
             "SOC2":     "CC8.1 – Change Management for Production",
@@ -113,19 +126,20 @@ PHRASE_RULES = [
         },
         "remediation": (
             "Enforce mandatory security scans in CI/CD pipeline, review and "
-            "revoke bypass permissions."
+            "revoke bypass permissions, and require re-approval for the change."
         ),
         "phrases": [
             "skip scan", "bypass scan", "scan disabled", "no security scan",
             "force push", "skip review", "override approval", "emergency change",
             "scan skipped", "review bypassed", "approval bypassed",
-            "skipping scan", "no-verify", "scan override",
+            "skipping scan", "--no-verify", "scan override", "bypass pipeline",
+            "skip ci", "no-verify flag", "disable scan",
         ],
     },
     {
-        "rule_id":   "SP009",
-        "title":     "Excessive or wildcard permissions assigned",
-        "severity":  "MEDIUM",
+        "rule_id":  "SP009",
+        "title":    "Excessive or wildcard permissions assigned",
+        "severity": "MEDIUM",
         "frameworks": {
             "ISO27001": "A.9.2.3 – Management of Privileged Access Rights",
             "SOC2":     "CC6.1 – Logical Access Controls",
@@ -134,19 +148,19 @@ PHRASE_RULES = [
         },
         "remediation": (
             "Apply least-privilege principle, replace wildcard permissions with "
-            "scoped policies, review IAM roles quarterly."
+            "scoped policies, and review IAM roles quarterly."
         ),
         "phrases": [
-            "full access", "all permissions", "wildcard policy",
+            "full access", "all permissions", "wildcard policy", "wildcard permission",
             "excessive permission", "over privileged", "unrestricted access",
-            "overprivileged", "admin permissions", "root permissions",
-            "blanket access", "open permissions",
+            "overprivileged", "blanket access", "open permissions",
+            "* permissions", "grant all", "allow *",
         ],
     },
     {
-        "rule_id":   "SP010",
-        "title":     "Unusual access time or geographic anomaly",
-        "severity":  "MEDIUM",
+        "rule_id":  "SP010",
+        "title":    "Unusual access time or geographic anomaly",
+        "severity": "MEDIUM",
         "frameworks": {
             "ISO27001": "A.12.4.1 – Event Logging",
             "SOC2":     "CC6.6 – System Monitoring",
@@ -155,19 +169,20 @@ PHRASE_RULES = [
         },
         "remediation": (
             "Investigate source IP, enable geo-blocking for high-risk regions, "
-            "notify user and enforce re-authentication."
+            "notify user, and enforce re-authentication."
         ),
         "phrases": [
             "unusual location", "suspicious location", "unusual time", "off hours",
             "anomalous access", "geo block", "unknown IP", "foreign IP",
             "VPN detected", "unexpected location", "suspicious IP",
             "outside business hours", "unusual activity", "geographic anomaly",
+            "login from new location", "unrecognized device",
         ],
     },
     {
-        "rule_id":   "SP012",
-        "title":     "Compliance Policy Exception or Bypass Requested",
-        "severity":  "HIGH",
+        "rule_id":  "SP012",
+        "title":    "Compliance policy exception or bypass requested",
+        "severity": "HIGH",
         "frameworks": {
             "ISO27001": "A.18.1.4 – Privacy and Protection of PII",
             "SOC2":     "CC6.1 – Logical Access Controls",
@@ -180,207 +195,319 @@ PHRASE_RULES = [
         ),
         "phrases": [
             "policy exception", "compliance bypass", "override security", "ignore policy",
-            "temporary bypass", "disable audit log", "bypass compliance", "exception requested"
+            "temporary bypass", "disable audit log", "bypass compliance",
+            "exception requested", "waive requirement", "skip compliance",
+            "audit log disabled", "logging disabled",
         ],
     },
 ]
 
 
-# ── Custom EntityRuler patterns (compliance-specific entity types) ─────
+# ══════════════════════════════════════════════════════════════════════
+#  CUSTOM ENTITY RULER PATTERNS
+# ══════════════════════════════════════════════════════════════════════
+
 ENTITY_RULER_PATTERNS = [
     {"label": "SECURITY_EVENT", "pattern": "privilege escalation"},
     {"label": "SECURITY_EVENT", "pattern": "brute force"},
     {"label": "SECURITY_EVENT", "pattern": "unauthorized access"},
     {"label": "SECURITY_EVENT", "pattern": "data breach"},
+    {"label": "SECURITY_EVENT", "pattern": "credential stuffing"},
     {"label": "PII_ACCESS",     "pattern": "personal data"},
     {"label": "PII_ACCESS",     "pattern": "patient records"},
     {"label": "PII_ACCESS",     "pattern": "medical records"},
     {"label": "PII_ACCESS",     "pattern": "credit card"},
+    {"label": "PII_ACCESS",     "pattern": "social security number"},
     {"label": "AUTH_FAILURE",   "pattern": "failed login"},
     {"label": "AUTH_FAILURE",   "pattern": "authentication failed"},
     {"label": "AUTH_FAILURE",   "pattern": "invalid credentials"},
+    {"label": "AUTH_FAILURE",   "pattern": "brute force"},
     {"label": "POLICY_BYPASS",  "pattern": "bypass scan"},
     {"label": "POLICY_BYPASS",  "pattern": "skip review"},
     {"label": "POLICY_BYPASS",  "pattern": "override approval"},
     {"label": "POLICY_BYPASS",  "pattern": "compliance bypass"},
     {"label": "POLICY_BYPASS",  "pattern": "temporary bypass"},
     {"label": "POLICY_BYPASS",  "pattern": "policy exception"},
+    {"label": "POLICY_BYPASS",  "pattern": "audit log disabled"},
 ]
 
-# Add EntityRuler before the default NER so custom entities take precedence
-ruler = nlp.add_pipe("entity_ruler", before="ner")
-ruler.add_patterns(ENTITY_RULER_PATTERNS)
+
+# ══════════════════════════════════════════════════════════════════════
+#  LAZY MODEL INITIALISATION
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_nlp():
+    """Load spaCy model and build matcher on first call. Raises clearly if missing."""
+    global _nlp, _matcher, _rule_phrase_map
+
+    if _nlp is not None:
+        return _nlp, _matcher, _rule_phrase_map
+
+    try:
+        import spacy
+        from spacy.matcher import PhraseMatcher
+    except ImportError:
+        raise ImportError("spacy is not installed. Run: pip install spacy")
+
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        raise OSError(
+            "spaCy model 'en_core_web_sm' not found.\n"
+            "Run: python3 -m spacy download en_core_web_sm"
+        )
+
+    # Add EntityRuler before NER so custom entities take precedence
+    ruler = nlp.add_pipe("entity_ruler", before="ner")
+    ruler.add_patterns(ENTITY_RULER_PATTERNS)
+
+    # Build PhraseMatcher
+    matcher         = PhraseMatcher(nlp.vocab, attr="LOWER")
+    rule_phrase_map = {}
+
+    for rule in PHRASE_RULES:
+        for phrase in rule["phrases"]:
+            key      = f"{rule['rule_id']}::{phrase}"
+            patterns = [nlp.make_doc(phrase)]
+            matcher.add(key, patterns)
+            rule_phrase_map[key] = (rule, phrase)
+
+    _nlp            = nlp
+    _matcher        = matcher
+    _rule_phrase_map = rule_phrase_map
+
+    return _nlp, _matcher, _rule_phrase_map
 
 
-# ── Build PhraseMatcher (case-insensitive via LOWER attr) ─────────────
-matcher       = PhraseMatcher(nlp.vocab, attr="LOWER")
-rule_phrase_map = {}  # match_key → rule dict
+# ══════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════════════
 
-for rule in PHRASE_RULES:
-    for phrase in rule["phrases"]:
-        key      = f"{rule['rule_id']}::{phrase}"
-        patterns = [nlp.make_doc(phrase)]
-        matcher.add(key, patterns)
-        rule_phrase_map[key] = rule
-
-
-# ── Helper: flatten nested dict/list → single string ─────────────────
-def _flatten_doc(doc) -> str:
-    """Recursively stringify all values for NLP scanning."""
-    if isinstance(doc, dict):
-        return " ".join(_flatten_doc(v) for v in doc.values())
-    if isinstance(doc, list):
-        return " ".join(_flatten_doc(i) for i in doc)
-    return str(doc)
+def _extract_user(payload: dict) -> str:
+    """Extract the acting user from a GitHub webhook payload."""
+    if isinstance(payload.get("pull_request"), dict):
+        login = payload["pull_request"].get("user", {}).get("login", "")
+        if login:
+            return login
+    if isinstance(payload.get("sender"), dict):
+        return payload["sender"].get("login", "Unknown")
+    if isinstance(payload.get("pusher"), dict):
+        return payload["pusher"].get("name", "Unknown")
+    return "Unknown"
 
 
-# ── Helper: extract user + timestamp using direct fields + NER ────────
-def _extract_metadata(doc_obj: dict, spacy_doc) -> tuple[str, str]:
+def _extract_timestamp(payload: dict) -> str:
+    """Extract the best available timestamp from a GitHub webhook payload."""
+    candidates = [
+        payload.get("pull_request", {}).get("created_at") if isinstance(payload.get("pull_request"), dict) else None,
+        payload.get("head_commit", {}).get("timestamp") if isinstance(payload.get("head_commit"), dict) else None,
+        payload.get("created_at"),
+        payload.get("timestamp"),
+    ]
+    for ts in candidates:
+        if ts:
+            return str(ts)
+    return datetime.utcnow().isoformat()
+
+
+def _flatten_field(value, max_depth: int = 6, _depth: int = 0) -> str:
+    """Recursively stringify a value for NLP scanning, with depth cap."""
+    if _depth > max_depth:
+        return ""
+    if isinstance(value, dict):
+        return " ".join(_flatten_field(v, max_depth, _depth + 1) for v in value.values())
+    if isinstance(value, list):
+        return " ".join(_flatten_field(i, max_depth, _depth + 1) for i in value)
+    return str(value)
+
+
+def _get_user_text_fields(payload: dict) -> str:
     """
-    Extract user_involved and timestamp.
-    Tries direct field lookup first; falls back to NER entities.
+    Extract only user-controlled text from a GitHub webhook payload.
+    Avoids scanning GitHub metadata fields (URLs, IDs, etc.) that generate noise.
     """
-    user_info = ""
-    
-    # GitHub specific fields
-    if "pull_request" in doc_obj and isinstance(doc_obj["pull_request"], dict):
-        pr_user = doc_obj["pull_request"].get("user", {})
-        if isinstance(pr_user, dict) and "login" in pr_user:
-            user_info = f"{pr_user.get('login')} (ID: {pr_user.get('id', 'unknown')})"
-    elif "sender" in doc_obj and isinstance(doc_obj["sender"], dict):
-        user_info = doc_obj["sender"].get("login", "")
-
-    # Legacy fields
-    if not user_info:
-        user_name  = doc_obj.get("user", doc_obj.get("username", doc_obj.get("user_name", "")))
-        if isinstance(user_name, dict): user_name = user_name.get("login", "")
-        user_email = doc_obj.get("email", doc_obj.get("user_email", ""))
-        user_info  = f"{user_name} ({user_email})" if user_email else str(user_name) if user_name else ""
-
-    timestamp = (
-        doc_obj.get("timestamp") or
-        doc_obj.get("created_at") or
-        (doc_obj.get("pull_request", {}).get("created_at") if isinstance(doc_obj.get("pull_request"), dict) else None) or
-        doc_obj.get("date") or ""
-    )
-
-    # NER fallback — PERSON/ORG for user, DATE/TIME for timestamp
-    if not user_info:
-        persons = [ent.text for ent in spacy_doc.ents if ent.label_ in ("PERSON", "ORG")]
-        if persons:
-            user_info = persons[0]
-
-    if not timestamp:
-        dates = [ent.text for ent in spacy_doc.ents if ent.label_ in ("DATE", "TIME")]
-        if dates:
-            timestamp = dates[0]
-
-    user_info = user_info or "Unknown"
-    timestamp = str(timestamp) if timestamp else datetime.now().isoformat()
-    return user_info, timestamp
+    user_fields = [
+        "title", "body", "message", "description", "name",
+        "commits", "head_commit", "comment", "review",
+    ]
+    parts = []
+    for field in user_fields:
+        value = payload.get(field)
+        if value:
+            parts.append(_flatten_field(value))
+    return " ".join(parts)
 
 
-# ── Main detector ─────────────────────────────────────────────────────
+def _check_context_phrase(text_lower: str, phrase: str, verbs: list[str],
+                           window: int = 60) -> Optional[str]:
+    """
+    For high-FP single-word phrases (admin, root, sudo), confirm intent by
+    checking for an action verb within `window` characters on either side.
+    Returns the matched context string or None.
+    """
+    idx = text_lower.find(phrase)
+    while idx != -1:
+        start   = max(0, idx - window)
+        end     = min(len(text_lower), idx + len(phrase) + window)
+        context = text_lower[start:end]
+        if any(verb in context for verb in verbs):
+            return context[: 120]
+        idx = text_lower.find(phrase, idx + 1)
+    return None
+
+
+def _extract_ner_metadata(spacy_doc, payload: dict) -> tuple[str, str, list, list]:
+    """
+    Run NER on a spaCy doc and return:
+      (user_fallback, timestamp_fallback, custom_entity_labels, location_texts)
+    """
+    user_fallback = ""
+    ts_fallback   = ""
+    custom_labels = []
+    locations     = []
+
+    for ent in spacy_doc.ents:
+        if ent.label_ in ("PERSON", "ORG") and not user_fallback:
+            user_fallback = ent.text
+        elif ent.label_ in ("DATE", "TIME") and not ts_fallback:
+            ts_fallback = ent.text
+        elif ent.label_ == "GPE":
+            locations.append(ent.text)
+        elif ent.label_ in ("SECURITY_EVENT", "PII_ACCESS", "AUTH_FAILURE", "POLICY_BYPASS"):
+            custom_labels.append(ent.label_)
+
+    return user_fallback, ts_fallback, sorted(set(custom_labels)), locations[:3]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MAIN DETECTOR
+# ══════════════════════════════════════════════════════════════════════
+
 def run_spacy_detector(data: dict) -> list[dict]:
     """
-    Scan all MongoDB collections with spaCy PhraseMatcher + NER + EntityRuler.
+    Scan GitHub webhook payloads with spaCy PhraseMatcher + NER + EntityRuler.
 
     Args:
-        data: dict of {collection_name: [list of documents]}
+        data: dict of {repo_name: [list of payload dicts]}
 
     Returns:
-        List of violation dicts in the same schema used by LLM and regex layers.
+        List of violation dicts.
     """
+    nlp, matcher, rule_phrase_map = _get_nlp()
+
     violations   = []
-    seen_combos  = set()   # deduplicate (rule_id, doc_id)
+    seen_combos  = set()   # (rule_id, repo_name, doc_id)
     violation_id = 1
 
-    for collection_name, docs in data.items():
-        for doc in docs:
-            doc_text = _flatten_doc(doc)
-            doc_id   = doc.get("_id", "unknown")
+    for repo_name, payloads in data.items():
+        for payload in payloads:
+            # Stable doc identifier
+            doc_id = (
+                payload.get("after")
+                or str(payload.get("pull_request", {}).get("number", ""))
+                or payload.get("delivery", "unknown")
+            )
 
-            # Run full spaCy pipeline (cap at 100k chars to avoid memory spikes)
-            spacy_doc = nlp(doc_text[:100_000])
+            # Only scan user-controlled text — not GitHub metadata
+            scan_text = _get_user_text_fields(payload)
+            if not scan_text.strip():
+                continue
 
-            # PhraseMatcher — collect unique rules fired in this document
+            # Cap at 100k chars to avoid memory spikes on huge diff payloads
+            spacy_doc  = nlp(scan_text[:100_000])
+            text_lower = scan_text.lower()
+
+            # ── PhraseMatcher ─────────────────────────────────────
             matches     = matcher(spacy_doc)
-            fired_rules = {}  # rule_id → rule (one entry per rule per doc)
+            fired_rules: dict[str, tuple] = {}  # rule_id → (rule, matched_phrase)
 
             for match_id, _start, _end in matches:
-                key  = nlp.vocab.strings[match_id]
-                rule = rule_phrase_map.get(key)
-                if rule:
-                    fired_rules[rule["rule_id"]] = rule
+                key = nlp.vocab.strings[match_id]
+                entry = rule_phrase_map.get(key)
+                if entry:
+                    rule, phrase = entry
+                    if rule["rule_id"] not in fired_rules:
+                        fired_rules[rule["rule_id"]] = (rule, phrase)
 
-            # Build one violation per unique rule fired
-            for rule_id, rule in fired_rules.items():
-                combo_key = (rule_id, str(doc_id))
+            # ── Context check for high-FP single-word SP001 phrases ─
+            sp001_rule = next((r for r in PHRASE_RULES if r["rule_id"] == "SP001"), None)
+            if sp001_rule and "SP001" not in fired_rules:
+                ctx_phrases = sp001_rule.get("_context_phrases", [])
+                ctx_verbs   = sp001_rule.get("_context_verbs", [])
+                for phrase in ctx_phrases:
+                    ctx = _check_context_phrase(text_lower, phrase, ctx_verbs)
+                    if ctx:
+                        fired_rules["SP001"] = (sp001_rule, f"{phrase} [context: ...{ctx.strip()[:60]}...]")
+                        break
+
+            # ── NER for metadata enrichment ───────────────────────
+            user_ner, ts_ner, custom_labels, locations = _extract_ner_metadata(spacy_doc, payload)
+
+            user_info = _extract_user(payload) or user_ner or "Unknown"
+            timestamp = _extract_timestamp(payload) or ts_ner or datetime.utcnow().isoformat()
+
+            # ── Build one violation per unique rule fired ──────────
+            for rule_id, (rule, matched_phrase) in fired_rules.items():
+                combo_key = (rule_id, repo_name, str(doc_id))
                 if combo_key in seen_combos:
                     continue
                 seen_combos.add(combo_key)
 
-                user_info, timestamp = _extract_metadata(doc, spacy_doc)
-
-                # Collect custom entity types found in this doc
-                custom_entities = sorted({
-                    ent.label_ for ent in spacy_doc.ents
-                    if ent.label_ in ("SECURITY_EVENT", "PII_ACCESS", "AUTH_FAILURE", "POLICY_BYPASS")
-                })
-
-                # Geographic context from NER
-                locations = [ent.text for ent in spacy_doc.ents if ent.label_ == "GPE"]
-                geo_note  = f" | Location context: {', '.join(locations[:3])}" if locations else ""
-                ent_note  = f" | Entities: {', '.join(custom_entities)}" if custom_entities else ""
+                geo_note = f" | Locations: {', '.join(locations)}" if locations else ""
+                ent_note = f" | Entities: {', '.join(custom_labels)}" if custom_labels else ""
 
                 violations.append({
-                    "id":           f"SP{violation_id:03d}",
-                    "detection":    "SPACY",
-                    "rule_id":      rule_id,
-                    "source":       collection_name.upper().replace("_", " "),
-                    "severity":     rule["severity"],
-                    "title":        rule["title"],
-                    "description":  (
-                        f"[SPACY {rule_id}] NLP phrase match in '{collection_name}' "
-                        f"document (id={doc_id}). Rule: {rule['title']}.{ent_note}{geo_note}"
+                    "id":            f"SP{violation_id:03d}",
+                    "detection":     "SPACY",
+                    "rule_id":       rule_id,
+                    "source":        repo_name,
+                    "severity":      rule["severity"],
+                    "title":         rule["title"],
+                    "description":   (
+                        f"[{rule_id}] {rule['title']} in repo '{repo_name}'. "
+                        f"Matched phrase: \"{matched_phrase}\".{ent_note}{geo_note}"
                     ),
-                    "user_involved": user_info,
-                    "timestamp":    timestamp,
-                    "frameworks":   rule["frameworks"],
-                    "remediation":  rule["remediation"],
+                    "user_involved":  user_info,
+                    "timestamp":      timestamp,
+                    "frameworks":     rule["frameworks"],
+                    "remediation":    rule["remediation"],
+                    "matched_text":   matched_phrase,   # passed to LLM for richer enrichment
                 })
                 violation_id += 1
 
     return violations
 
 
-# ── Standalone entry point (run directly for testing) ─────────────────
+# ══════════════════════════════════════════════════════════════════════
+#  STANDALONE ENTRY POINT — test against a local webhook_data.json
+# ══════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     import os
-    from pymongo import MongoClient
-    from dotenv import load_dotenv
+    import json
 
-    load_dotenv()
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-    MONGO_DB  = os.getenv("MONGO_DB",  "jira_audit_db")
+    ROOT         = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    WEBHOOK_FILE = os.path.join(ROOT, "webhook_data.json")
 
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db     = client[MONGO_DB]
+    if not os.path.exists(WEBHOOK_FILE):
+        print(f"❌ No webhook_data.json found at {WEBHOOK_FILE}")
+        raise SystemExit(1)
 
-    data = {}
-    for col in ["access_logs", "audit_evidence", "cloud_audit", "db_activity", "deployments"]:
-        docs = list(db[col].find({}))
-        for d in docs:
-            d["_id"] = str(d["_id"])
-        data[col] = docs
+    with open(WEBHOOK_FILE) as f:
+        raw = json.load(f)
+
+    entries = raw if isinstance(raw, list) else [{"payload": raw}]
+    data: dict[str, list] = {}
+    for entry in entries:
+        payload   = entry.get("payload", entry)
+        repo_name = payload.get("repository", {}).get("full_name", "GITHUB_WEBHOOK")
+        data.setdefault(repo_name, []).append(payload)
 
     print("🧠 Running standalone spaCy detector (Layer A1)...\n")
     results = run_spacy_detector(data)
-    print(f"✅ spaCy detector found {len(results)} violations:\n")
+    print(f"✅ spaCy detector found {len(results)} violation(s):\n")
     for v in results:
-        tag = "[SPACY]"
-        print(f"  [{v['id']}] {tag} {v['severity']:8s}  {v['title']}")
-        print(f"           Source: {v['source']}  |  User: {v['user_involved']}")
+        print(f"  [{v['id']}] {v['severity']:8s}  {v['title']}")
+        print(f"           Matched : {v.get('matched_text', 'N/A')}")
+        print(f"           User    : {v['user_involved']}")
         print()
-
-    client.close()

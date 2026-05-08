@@ -2,24 +2,44 @@ import json
 import os
 from datetime import datetime
 
+# ── Absolute path anchors ─────────────────────────────────────
+# app/services/report_generator.py → up two levels to project root
+ROOT          = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+VIOLATION_IN  = os.path.join(ROOT, "violation_report.json")
+FRAMEWORK_IN  = os.path.join(ROOT, "framework_mapping_report.json")
+DASHBOARD_OUT = os.path.join(ROOT, "compliance_dashboard.html")
+
 SEV_COLOR = {"CRITICAL": "#ef4444", "HIGH": "#f97316", "MEDIUM": "#eab308", "LOW": "#22c55e"}
 SEV_BG    = {"CRITICAL": "rgba(239,68,68,0.15)", "HIGH": "rgba(249,115,22,0.15)",
              "MEDIUM": "rgba(234,179,8,0.15)", "LOW": "rgba(34,197,94,0.15)"}
 
+
 def score_color(s):
     return "#ef4444" if s < 60 else "#f97316" if s < 75 else "#eab308" if s < 90 else "#22c55e"
+
 
 def score_label(s):
     return "CRITICAL" if s < 60 else "HIGH" if s < 75 else "MEDIUM" if s < 90 else "PASSING"
 
+
 def load_reports():
-    with open("violation_report.json") as f:
+    if not os.path.exists(VIOLATION_IN):
+        print(f"❌ violation_report.json not found at {VIOLATION_IN}")
+        print("   Run Layer 1 (compliance_agent.py) first.")
+        raise SystemExit(1)
+
+    with open(VIOLATION_IN) as f:
         vr = json.load(f)
+
     fr = {}
-    if os.path.exists("framework_mapping_report.json"):
-        with open("framework_mapping_report.json") as f:
+    if os.path.exists(FRAMEWORK_IN):
+        with open(FRAMEWORK_IN) as f:
             fr = json.load(f)
+    else:
+        print(f"⚠️  framework_mapping_report.json not found at {FRAMEWORK_IN} — scores will default to 100.")
+
     return vr, fr
+
 
 def generate_report():
     print("Generating HTML Compliance Dashboard...")
@@ -31,7 +51,7 @@ def generate_report():
     gen_at     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
-        score_num = int(str(fr.get("overall_score", summary.get("compliance_score", 0))).replace("/100","").strip())
+        score_num = int(str(fr.get("overall_score", summary.get("compliance_score", 0))).replace("/100", "").strip())
     except (ValueError, AttributeError):
         score_num = 0
 
@@ -213,7 +233,7 @@ function filterTable(s) {{
   document.querySelectorAll('.vr').forEach(r => {{
     r.style.display = (s === 'all' || r.dataset.s === s) ? '' : 'none';
     let desc = document.getElementById('desc-' + r.children[1].innerText);
-    if(desc) desc.style.display = 'none'; // hide descriptions on filter change
+    if(desc) desc.style.display = 'none';
   }});
 }}
 function filterByFramework(fw) {{
@@ -232,13 +252,12 @@ function toggleRow(id) {{
 </script>
 </body></html>"""
 
-    path = "compliance_dashboard.html"
-    with open(path, "w") as f:
+    with open(DASHBOARD_OUT, "w") as f:
         f.write(html)
-    abs_path = os.path.abspath(path)
-    print(f"Dashboard saved to: {path}")
-    print(f"Open in browser:   file://{abs_path}")
-    return abs_path
+    print(f"📄 Dashboard saved to:  {DASHBOARD_OUT}")
+    print(f"   Open in browser:    file://{DASHBOARD_OUT}")
+    return DASHBOARD_OUT
+
 
 if __name__ == "__main__":
     generate_report()

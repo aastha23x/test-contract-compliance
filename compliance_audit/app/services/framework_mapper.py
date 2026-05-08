@@ -1,11 +1,19 @@
-from datetime import datetime
+import os
 import json
+from datetime import datetime
+
 from app.agents.iso27001_agent import ISO27001Agent
 from app.agents.soc2_agent import SOC2Agent
 from app.agents.hipaa_agent import HIPAAAgent
 from app.agents.gdpr_agent import GDPRAgent
 
-# ── Framework rules reference ──────────────────────────────────
+# ── Absolute path anchors ─────────────────────────────────────
+# app/services/framework_mapper.py → up two levels to project root
+ROOT           = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+VIOLATION_IN   = os.path.join(ROOT, "violation_report.json")
+FRAMEWORK_OUT  = os.path.join(ROOT, "framework_mapping_report.json")
+
+# ── Framework rules reference ─────────────────────────────────
 FRAMEWORK_CONTROLS = {
     "ISO27001": {
         "A.9.2.3":  "Management of Privileged Access Rights",
@@ -29,11 +37,12 @@ FRAMEWORK_CONTROLS = {
         "Article 5":  "Principles of Data Processing",
         "Article 6":  "Lawfulness of Processing",
         "Article 32": "Security of Processing",
-    }
+    },
 }
 
-# ── Calculate per-framework score ──────────────────────────────
-def calc_score(violations_list):
+
+# ── Calculate per-framework score ─────────────────────────────
+def calc_score(violations_list: list) -> int:
     if not violations_list:
         return 100
     severity_weights = {"CRITICAL": 25, "HIGH": 15, "MEDIUM": 8, "LOW": 3}
@@ -43,24 +52,24 @@ def calc_score(violations_list):
     )
     return max(0, 100 - total_deduction)
 
-# ── Build framework map from violations ────────────────────────
-def build_framework_map(violations):
+
+# ── Build framework map from violations ───────────────────────
+def build_framework_map(violations: list) -> dict:
     framework_map = {
         "ISO27001": {},
         "SOC2":     {},
         "HIPAA":    {},
-        "GDPR":     {}
+        "GDPR":     {},
     }
 
     agents = {
         "ISO27001": ISO27001Agent(),
         "SOC2":     SOC2Agent(),
         "HIPAA":    HIPAAAgent(),
-        "GDPR":     GDPRAgent()
+        "GDPR":     GDPRAgent(),
     }
 
     for v in violations:
-        # Clear out any old rule-engine frameworks and rely solely on the Agent mappings
         v["frameworks"] = {}
         for fw, agent in agents.items():
             control_string = agent.map(v)
@@ -74,35 +83,33 @@ def build_framework_map(violations):
                     "severity":    v.get("severity"),
                     "source":      v.get("source"),
                     "user":        v.get("user_involved", "N/A"),
-                    "remediation": v.get("remediation")
+                    "remediation": v.get("remediation"),
                 })
 
     return framework_map
 
-# ── Print framework report ─────────────────────────────────────
-def print_framework_report(violations, summary, framework_map):
+
+# ── Print framework report ────────────────────────────────────
+def print_framework_report(violations: list, summary: dict, framework_map: dict) -> dict:
     print("\n" + "=" * 70)
-    print("   LAYER 3 — COMPLIANCE FRAMEWORK MAPPING REPORT")
+    print("   LAYER 2 — COMPLIANCE FRAMEWORK MAPPING REPORT")
     print("=" * 70)
     print(f"   Generated at     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"   Total Violations : {summary.get('total_violations', 0)}")
     print(f"   Overall Risk     : {summary.get('overall_risk', 'N/A')}")
     print("=" * 70)
 
-    # ── Per-framework scores ───────────────────────────────────
+    # ── Per-framework scores ──────────────────────────────────
     framework_scores = {}
     for fw in ["ISO27001", "SOC2", "HIPAA", "GDPR"]:
-        fw_violations = []
-        for ctrl, viols in framework_map[fw].items():
-            fw_violations.extend(viols)
+        fw_violations = [v for viols in framework_map[fw].values() for v in viols]
         framework_scores[fw] = calc_score(fw_violations)
 
-    # ── Per framework breakdown ────────────────────────────────
+    # ── Per-framework breakdown ───────────────────────────────
     for fw in ["ISO27001", "SOC2", "HIPAA", "GDPR"]:
         controls    = framework_map[fw]
         score       = framework_scores[fw]
         total_viols = sum(len(v) for v in controls.values())
-
         status      = "CRITICAL" if score < 60 else "HIGH" if score < 75 else "MEDIUM" if score < 90 else "PASSING"
         status_icon = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "PASSING": "🟢"}.get(status, "⚪")
 
@@ -125,7 +132,7 @@ def print_framework_report(violations, summary, framework_map):
                     print(f"         User   : {v.get('user')}")
                     print(f"         Fix    : {v.get('remediation')}")
 
-    # ── Summary table ──────────────────────────────────────────
+    # ── Summary table ─────────────────────────────────────────
     print("\n\n" + "=" * 70)
     print("   FRAMEWORK SCORE SUMMARY")
     print("=" * 70)
@@ -142,7 +149,7 @@ def print_framework_report(violations, summary, framework_map):
     print(f"\n   Overall Compliance Score : {overall}/100")
     print("=" * 70)
 
-    # ── Priority remediation list ──────────────────────────────
+    # ── Priority remediation list ─────────────────────────────
     print("\n\n   TOP PRIORITY FIXES (Critical first)")
     print("-" * 70)
     severity_order    = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
@@ -157,35 +164,41 @@ def print_framework_report(violations, summary, framework_map):
     print("   ✅ Framework mapping complete!")
     print("=" * 70 + "\n")
 
-    # ── Save mapped report ─────────────────────────────────────
+    # ── Build & save output ───────────────────────────────────
     output = {
-        "generated_at":    datetime.now().isoformat(),
-        "overall_score":   overall,
+        "generated_at":     datetime.now().isoformat(),
+        "overall_score":    overall,
         "framework_scores": framework_scores,
-        "framework_map":   framework_map,
-        "priority_fixes":  [
+        "framework_map":    framework_map,
+        "priority_fixes": [
             {
                 "rank":        i + 1,
                 "id":          v.get("id"),
                 "severity":    v.get("severity"),
                 "title":       v.get("title"),
-                "remediation": v.get("remediation")
+                "remediation": v.get("remediation"),
             }
             for i, v in enumerate(sorted_violations)
-        ]
+        ],
     }
 
-    with open("framework_mapping_report.json", "w") as f:
+    with open(FRAMEWORK_OUT, "w") as f:
         json.dump(output, f, indent=2)
-    print("📄 Framework mapping report saved to: framework_mapping_report.json\n")
+    print(f"📄 Framework mapping report saved to: {FRAMEWORK_OUT}\n")
 
     return output
 
-# ── Run ────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("🗺️  Running Layer 3 — Framework Mapper...")
 
-    with open("violation_report.json", "r") as f:
+# ── Run ───────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("🗺️  Running Layer 2 — Framework Mapper...")
+
+    if not os.path.exists(VIOLATION_IN):
+        print(f"❌ violation_report.json not found at {VIOLATION_IN}")
+        print("   Run Layer 1 (compliance_agent.py) first.")
+        raise SystemExit(1)
+
+    with open(VIOLATION_IN, "r") as f:
         report = json.load(f)
 
     violations    = report.get("violations", [])
