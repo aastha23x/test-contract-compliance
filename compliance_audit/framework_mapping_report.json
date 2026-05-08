@@ -1,0 +1,61 @@
+{
+  "generated_at": "2026-05-08T17:08:50.167487",
+  "overall_score": 92,
+  "framework_scores": {
+    "ISO27001": 85,
+    "SOC2": 85,
+    "HIPAA": 100,
+    "GDPR": 100
+  },
+  "framework_map": {
+    "ISO27001": {
+      "A.12.1.2 \u2014 Change Management": [
+        {
+          "id": "V001",
+          "title": "Security scan skipped or change management bypassed",
+          "severity": "HIGH",
+          "source": "aastha23x/test-contract-compliance",
+          "user": "aastha23x",
+          "remediation": "1. Implement mandatory pre-commit hooks that enforce security scans before any changes are pushed to the repository. Tools like Git hooks or CI/CD pipelines integrated with security scanners (e.g., SonarQube, Snyk) can be used.\n2. Configure the repository settings to require pull request reviews and approvals before merging changes into the main branch.\n3. Audit the modified file 'compliance_audit/app/compliance_dashboard.py' to ensure no vulnerabilities or unauthorized changes were introduced.\n4. Educate developers on the importance of adhering to security and change management policies.\n5. Monitor future commits for similar violations using automated compliance tools."
+        }
+      ]
+    },
+    "SOC2": {
+      "CC8.1 \u2014 Change Management": [
+        {
+          "id": "V001",
+          "title": "Security scan skipped or change management bypassed",
+          "severity": "HIGH",
+          "source": "aastha23x/test-contract-compliance",
+          "user": "aastha23x",
+          "remediation": "1. Implement mandatory pre-commit hooks that enforce security scans before any changes are pushed to the repository. Tools like Git hooks or CI/CD pipelines integrated with security scanners (e.g., SonarQube, Snyk) can be used.\n2. Configure the repository settings to require pull request reviews and approvals before merging changes into the main branch.\n3. Audit the modified file 'compliance_audit/app/compliance_dashboard.py' to ensure no vulnerabilities or unauthorized changes were introduced.\n4. Educate developers on the importance of adhering to security and change management policies.\n5. Monitor future commits for similar violations using automated compliance tools."
+        }
+      ]
+    },
+    "HIPAA": {},
+    "GDPR": {}
+  },
+  "priority_fixes": [
+    {
+      "rank": 1,
+      "id": "V001",
+      "severity": "HIGH",
+      "title": "Security scan skipped or change management bypassed",
+      "remediation": "1. Implement mandatory pre-commit hooks that enforce security scans before any changes are pushed to the repository. Tools like Git hooks or CI/CD pipelines integrated with security scanners (e.g., SonarQube, Snyk) can be used.\n2. Configure the repository settings to require pull request reviews and approvals before merging changes into the main branch.\n3. Audit the modified file 'compliance_audit/app/compliance_dashboard.py' to ensure no vulnerabilities or unauthorized changes were introduced.\n4. Educate developers on the importance of adhering to security and change management policies.\n5. Monitor future commits for similar violations using automated compliance tools."
+    },
+    {
+      "rank": 2,
+      "id": "V002",
+      "severity": "HIGH",
+      "title": "Compliance policy exception or bypass requested",
+      "remediation": "1. Enforce strict controls on policy exception requests by requiring detailed justification and approval from designated compliance officers.\n2. Review the added file 'compliance_audit/framework_mapping_report.json' to ensure it adheres to compliance standards and does not contain sensitive or unverified data.\n3. Update the repository settings to prevent direct pushes to the main branch without compliance checks.\n4. Implement automated tools to flag and block policy exception requests unless explicitly approved.\n5. Conduct a retrospective review of this incident to identify gaps in the compliance process and address them."
+    },
+    {
+      "rank": 3,
+      "id": "V003",
+      "severity": "HIGH",
+      "title": "Unencrypted data storage or transmission",
+      "remediation": "1. Replace all instances of 'http://localhost:8080' with 'https://localhost:8080' to ensure encrypted data transmission.\n2. Configure the application to enforce HTTPS by default and redirect all HTTP traffic to HTTPS.\n3. Update the server configuration to include a valid SSL/TLS certificate for secure communication.\n4. Conduct a thorough review of the modified file 'compliance_audit/app/compliance_dashboard.py' to identify and address any other security vulnerabilities.\n5. Implement automated static code analysis tools to detect and prevent the use of unencrypted endpoints in future commits."
+    }
+  ]
+}
